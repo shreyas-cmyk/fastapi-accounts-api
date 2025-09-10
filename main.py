@@ -1,19 +1,16 @@
-from fastapi import FastAPI
-from psycopg2 import connect
+from fastapi import FastAPI, Query, HTTPException
+import psycopg2
 from psycopg2.extras import RealDictCursor
+from typing import Optional
+import os
 
-# --------------------------
-# FastAPI App Instance
-# --------------------------
 app = FastAPI(
     title="Accounts API",
-    description="API to fetch account details with Exact / Fuzzy / Website search",
+    description="API to fetch accounts with Exact/Fuzzy Search and Website Search",
     version="1.0.0"
 )
 
-# --------------------------
-# Database Configuration
-# --------------------------
+# Database configuration
 DB_CONFIG = {
     "dbname": "postgres",
     "user": "postgres",
@@ -22,55 +19,50 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-# --------------------------
-# Root Endpoint
-# --------------------------
-@app.get("/")
-def home():
-    return {"message": "FastAPI is running successfully! Visit /accounts to use the API."}
+# Create DB connection
+def get_db_connection():
+    return psycopg2.connect(**DB_CONFIG)
 
-# --------------------------
-# Accounts API with Exact / Fuzzy / Website Search
-# --------------------------
-@app.get("/accounts")
-def get_accounts(company: str = None, website: str = None, search_type: str = "exact"):
+@app.get("/search")
+def search_accounts(
+    company: Optional[str] = Query(None, description="Company name to search"),
+    website: Optional[str] = Query(None, description="Website to search"),
+    fuzzy: bool = Query(False, description="Enable fuzzy search for company names")
+):
     try:
-        # Connect to Database
-        conn = connect(**DB_CONFIG)
+        conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Base Query
-        query = "SELECT * FROM accounts WHERE TRUE"
+        # Build query dynamically based on provided params
+        query = "SELECT * FROM accounts WHERE 1=1"
         params = []
 
-        # Company Search (Exact / Fuzzy)
         if company:
-            if search_type.lower() == "fuzzy":
+            if fuzzy:
                 query += " AND account_global_legal_name ILIKE %s"
                 params.append(f"%{company}%")
             else:
-                query += " AND LOWER(account_global_legal_name) = LOWER(%s)"
+                query += " AND account_global_legal_name = %s"
                 params.append(company)
 
-        # Website Search
         if website:
-            query += " AND website ILIKE %s"
-            params.append(f"%{website}%")
+            query += " AND hq_website = %s"
+            params.append(website)
 
-        # Execute Query
+        # If no params are provided
+        if not company and not website:
+            raise HTTPException(status_code=400, detail="Please provide at least one search parameter: company or website")
+
         cursor.execute(query, tuple(params))
         results = cursor.fetchall()
 
-        # Close DB Connection
         cursor.close()
         conn.close()
 
-        # Handle No Results
         if not results:
-            return {"message": "No matching records found.", "count": 0, "data": []}
+            raise HTTPException(status_code=404, detail="No matching records found.")
 
-        # Return Success Response
-        return {"count": len(results), "data": results}
+        return {"count": len(results), "results": results}
 
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
