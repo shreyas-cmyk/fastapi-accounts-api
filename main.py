@@ -17,8 +17,10 @@ DB_CONFIG = {
 }
 
 def get_db_connection():
-    return psycopg2.connect(**DB_CONFIG)
-
+    return psycopg2.connect(**DB_CONFIG) 
+@app.get("/")
+def home():
+    return {"message": "FastAPI is running successfully! Visit /accounts to use the API."}
 @app.get("/account/details")
 def get_account_and_services(
     name: str = Query(None, description="Enter company name to fetch details"),
