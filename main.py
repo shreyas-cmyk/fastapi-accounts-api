@@ -1,13 +1,19 @@
-import psycopg2
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
+from psycopg2 import connect
+from psycopg2.extras import RealDictCursor
 
+# --------------------------
+# FastAPI App Instance
+# --------------------------
 app = FastAPI(
-    title="Accounts & Services API",
-    description="Fetch account details and department-wise services from Supabase Postgres DB",
-    version="3.0"
+    title="Accounts API",
+    description="API to fetch account details with Exact / Fuzzy / Website search",
+    version="1.0.0"
 )
 
+# --------------------------
+# Database Configuration
+# --------------------------
 DB_CONFIG = {
     "dbname": "postgres",
     "user": "postgres",
@@ -16,86 +22,55 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-def get_db_connection():
-    return psycopg2.connect(**DB_CONFIG) 
+# --------------------------
+# Root Endpoint
+# --------------------------
 @app.get("/")
 def home():
     return {"message": "FastAPI is running successfully! Visit /accounts to use the API."}
-@app.get("/account/details")
-def get_account_and_services(
-    name: str = Query(None, description="Enter company name to fetch details"),
-    website: str = Query(None, description="Enter company website to fetch details"),
-    fuzzy: bool = Query(False, description="Enable fuzzy search for company name")
-):
+
+# --------------------------
+# Accounts API with Exact / Fuzzy / Website Search
+# --------------------------
+@app.get("/accounts")
+def get_accounts(company: str = None, website: str = None, search_type: str = "exact"):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        # Connect to Database
+        conn = connect(**DB_CONFIG)
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        if website:
-            cursor.execute(
-                "SELECT * FROM accounts1 WHERE LOWER(website) = LOWER(%s) LIMIT 1;",
-                (website,))
-        elif name:
-            if fuzzy:
-                cursor.execute(
-                    "SELECT * FROM accounts1 WHERE LOWER(account_global_legal_name) LIKE LOWER(%s) LIMIT 1;",
-                    (f"%{name}%",))
+        # Base Query
+        query = "SELECT * FROM accounts WHERE TRUE"
+        params = []
+
+        # Company Search (Exact / Fuzzy)
+        if company:
+            if search_type.lower() == "fuzzy":
+                query += " AND account_global_legal_name ILIKE %s"
+                params.append(f"%{company}%")
             else:
-                cursor.execute(
-                    "SELECT * FROM accounts1 WHERE LOWER(account_global_legal_name) = LOWER(%s) LIMIT 1;",
-                    (name,))
-        else:
-            raise HTTPException(status_code=400, detail="Please provide either 'name' or 'website'")
+                query += " AND LOWER(account_global_legal_name) = LOWER(%s)"
+                params.append(company)
 
-        account_row = cursor.fetchone()
-        if not account_row:
-            raise HTTPException(status_code=404, detail="No matching account found")
+        # Website Search
+        if website:
+            query += " AND website ILIKE %s"
+            params.append(f"%{website}%")
 
-        account_columns = [desc[0] for desc in cursor.description]
-        account_data = dict(zip(account_columns, account_row))
+        # Execute Query
+        cursor.execute(query, tuple(params))
+        results = cursor.fetchall()
 
-        name_filter = account_data["account_global_legal_name"]
+        # Close DB Connection
+        cursor.close()
+        conn.close()
 
-        cursor.execute("""
-            SELECT 
-                MAX(account_global_legal_name) AS account_global_legal_name,
-                ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(it, '')), NULL) AS it_services,
-                ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(erd, '')), NULL) AS erd_services,
-                ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(fna, '')), NULL) AS fna_services,
-                ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(hr, '')), NULL) AS hr_services,
-                ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(procurement_and_supply_chain, '')), NULL) AS procurement_services,
-                ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(sales_and_marketing, '')), NULL) AS sales_marketing_services,
-                ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(customer_support_services, '')), NULL) AS customer_support_services,
-                ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(others_service, '')), NULL) AS other_services
-            FROM services1
-            WHERE LOWER(account_global_legal_name) = LOWER(%s)
-            GROUP BY account_global_legal_name;
-        """, (name_filter,))
+        # Handle No Results
+        if not results:
+            return {"message": "No matching records found.", "count": 0, "data": []}
 
-        services_row = cursor.fetchone()
-        services_data = {}
-
-        if services_row:
-            services_columns = [desc[0] for desc in cursor.description]
-            services_dict = dict(zip(services_columns, services_row))
-
-            for dept, services in services_dict.items():
-                if dept == "account_global_legal_name":
-                    continue
-                if services and len(services) > 0:
-                    services_data[dept.replace("_services", "").replace("_", " ").title()] = services
-
-        response = {
-            "account_details": account_data,
-            "services": services_data
-        }
-        return JSONResponse(content=response, status_code=200)
+        # Return Success Response
+        return {"count": len(results), "data": results}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        return {"error": str(e)}
