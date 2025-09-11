@@ -1,17 +1,27 @@
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import HTMLResponse
+import jwt
+import datetime
+from fastapi import FastAPI, Query, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import Optional
 
-# FastAPI App Config
+# FastAPI app
 app = FastAPI(
     title="Accounts API",
-    description="Search accounts by company name and website with exact or fuzzy search.",
-    version="1.0.0"
+    description="Search accounts by company name or website (with token authentication).",
+    version="2.0.0"
 )
 
-# NeonDB Database Configuration
+# OAuth2 setup
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Secret key for JWT
+SECRET_KEY = "supersecretkey"  # replace with secure key in production
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Neon DB configuration (your provided credentials)
 DB_CONFIG = {
     "dbname": "neondb",
     "user": "neondb_owner",
@@ -20,51 +30,54 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-# Function to connect to NeonDB
+# DB connection
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
 
-# Root URL → Search Form
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return """
-    <html>
-        <head>
-            <title>Accounts Search</title>
-        </head>
-        <body style="font-family: Arial; padding: 30px; background-color: #f7f7f7;">
-            <h1 style="color: #4CAF50;">🔍 Accounts Search</h1>
-            <form action="/search" method="get" style="margin-bottom: 20px;">
-                <label><b>Company Name:</b></label>
-                <input type="text" name="company" placeholder="Enter company name" style="padding: 8px; width: 300px;"><br><br>
-                
-                <label><b>Website:</b></label>
-                <input type="text" name="website" placeholder="Enter website" style="padding: 8px; width: 300px;"><br><br>
-                
-                <label><b>Fuzzy Search:</b></label>
-                <input type="checkbox" name="fuzzy" value="true"><br><br>
-                
-                <button type="submit" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">
-                    Search
-                </button>
-            </form>
-        </body>
-    </html>
-    """
 
-# Search Endpoint
-@app.get("/search", response_class=HTMLResponse)
+# Utility: create JWT token
+def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.datetime.utcnow() + (expires_delta or datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# Auth dependency: validate token
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        return email
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+# Endpoint to generate token
+@app.post("/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    # For demo → any email/password is accepted
+    access_token = create_access_token(data={"sub": form_data.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+# Search endpoint (protected)
+@app.get("/search")
 def search_accounts(
     company: Optional[str] = Query(None, description="Company name to search"),
     website: Optional[str] = Query(None, description="Website to search"),
-    fuzzy: bool = Query(False, description="Enable fuzzy search for company names")
+    fuzzy: bool = Query(False, description="Enable fuzzy search"),
+    current_user: str = Depends(get_current_user)
 ):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Build SQL query dynamically
-        query = "SELECT * FROM accounts1 WHERE 1=1"  # ✅ Use accounts1
+        query = "SELECT * FROM accounts1 WHERE 1=1"
         params = []
 
         if company:
@@ -80,7 +93,7 @@ def search_accounts(
             params.append(website)
 
         if not company and not website:
-            return "<h3 style='color:red;'>⚠ Please provide at least one search parameter: company or website.</h3>"
+            raise HTTPException(status_code=400, detail="Provide at least one parameter: company or website")
 
         cursor.execute(query, tuple(params))
         results = cursor.fetchall()
@@ -88,37 +101,18 @@ def search_accounts(
         cursor.close()
         conn.close()
 
-        # If no records found
         if not results:
-            return "<h3 style='color:red;'>❌ No matching records found.</h3>"
+            raise HTTPException(status_code=404, detail="No records found")
 
-        # Create HTML table for results
-        table_html = """
-        <html>
-            <head>
-                <title>Search Results</title>
-            </head>
-            <body style="font-family: Arial; padding: 20px;">
-                <h2 style="color: #4CAF50;">✅ Search Results</h2>
-                <table border="1" style="border-collapse: collapse; width: 100%;">
-                    <tr style="background-color: #4CAF50; color: white;">
-        """
-
-        # Table Headers
-        for col in results[0].keys():
-            table_html += f"<th style='padding: 8px; text-align: left;'>{col}</th>"
-        table_html += "</tr>"
-
-        # Table Rows
-        for row in results:
-            table_html += "<tr>"
-            for val in row.values():
-                table_html += f"<td style='padding: 8px; border: 1px solid #ddd;'>{val}</td>"
-            table_html += "</tr>"
-
-        table_html += "</table></body></html>"
-
-        return table_html
+        return {"count": len(results), "results": results, "requested_by": current_user}
 
     except Exception as e:
-        return f"<h3 style='color:red;'>🚨 Internal Server Error: {str(e)}</h3>"
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Log Render URL when app starts
+@app.on_event("startup")
+async def startup_event():
+    render_url = "https://fastapi-accounts-api.onrender.com"
+    print(f"✅ Service running at: {render_url}")
+    print("📌 Use /docs for Swagger UI or /redoc for ReDoc")
