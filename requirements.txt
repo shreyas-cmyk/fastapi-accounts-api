@@ -3,3 +3,4 @@ uvicorn
 psycopg2-binary
 python-dotenv
 PyJWT==2.9.0
+python-multipart
