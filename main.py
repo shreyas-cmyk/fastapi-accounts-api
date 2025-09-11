@@ -116,3 +116,8 @@ async def startup_event():
     render_url = "https://fastapi-accounts-api.onrender.com"
     print(f"✅ Service running at: {render_url}")
     print("📌 Use /docs for Swagger UI or /redoc for ReDoc")
+
+@app.get("/")
+def root():
+    return {"message": "API is running. Use /docs for Swagger UI or /accounts for data."}
+
