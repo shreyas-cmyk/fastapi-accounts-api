@@ -1,27 +1,20 @@
-import jwt
-import datetime
-from fastapi import FastAPI, Query, HTTPException, Depends, status
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
+from typing import Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from typing import Optional
+import bcrypt
+from pydantic import BaseModel
 
-# FastAPI app
-app = FastAPI(
-    title="Accounts API",
-    description="Search accounts by company name or website (with token authentication).",
-    version="2.0.0"
-)
-
-# OAuth2 setup
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-# Secret key for JWT
-SECRET_KEY = "supersecretkey"  # replace with secure key in production
+# ===============================
+# Config
+# ===============================
+SECRET_KEY = "supersecretkey"  # 🔒 change in production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Neon DB configuration (your provided credentials)
 DB_CONFIG = {
     "dbname": "neondb",
     "user": "neondb_owner",
@@ -30,94 +23,139 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-# DB connection
+app = FastAPI(title="Accounts API", version="2.1.0")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# ===============================
+# Database Connection
+# ===============================
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
 
+# ===============================
+# Auth Helpers
+# ===============================
+def authenticate_user(email: str, password: str):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
+    user = cursor.fetchone()
+    cursor.close()
+    conn.close()
 
-# Utility: create JWT token
-def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] = None):
+    if not user:
+        return False
+    if not bcrypt.checkpw(password.encode("utf-8"), user["hashed_password"].encode("utf-8")):
+        return False
+    return user
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
-    expire = datetime.datetime.utcnow() + (expires_delta or datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-# Auth dependency: validate token
-def get_current_user(token: str = Depends(oauth2_scheme)):
+async def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         if email is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid authentication")
         return email
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+# ===============================
+# Pydantic Models
+# ===============================
+class RegisterUser(BaseModel):
+    email: str
+    password: str
+
+# ===============================
+# Routes
+# ===============================
+@app.post("/register")
+async def register(user: RegisterUser):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # check if user already exists
+    cursor.execute("SELECT id FROM users WHERE email = %s", (user.email,))
+    existing = cursor.fetchone()
+    if existing:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="User already exists")
+
+    # hash password
+    hashed_pw = bcrypt.hashpw(user.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    # insert new user
+    cursor.execute(
+        "INSERT INTO users (email, hashed_password) VALUES (%s, %s) RETURNING id",
+        (user.email, hashed_pw)
+    )
+    user_id = cursor.fetchone()[0]
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {"message": "User registered successfully", "user_id": user_id}
 
 
-# Endpoint to generate token
 @app.post("/token")
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    # For demo → any email/password is accepted
-    access_token = create_access_token(data={"sub": form_data.username})
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user["email"]}, expires_delta=access_token_expires
+    )
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-# Search endpoint (protected)
-@app.get("/search")
-def search_accounts(
-    company: Optional[str] = Query(None, description="Company name to search"),
-    website: Optional[str] = Query(None, description="Website to search"),
+@app.get("/accounts")
+async def search_accounts(
+    company: Optional[str] = Query(None, description="Company name"),
+    website: Optional[str] = Query(None, description="Website"),
     fuzzy: bool = Query(False, description="Enable fuzzy search"),
     current_user: str = Depends(get_current_user)
 ):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        query = "SELECT * FROM accounts1 WHERE 1=1"
-        params = []
+    query = "SELECT * FROM accounts1 WHERE 1=1"
+    params = []
 
-        if company:
-            if fuzzy:
-                query += " AND account_global_legal_name ILIKE %s"
-                params.append(f"%{company}%")
-            else:
-                query += " AND account_global_legal_name = %s"
-                params.append(company)
+    if company:
+        if fuzzy:
+            query += " AND account_global_legal_name ILIKE %s"
+            params.append(f"%{company}%")
+        else:
+            query += " AND account_global_legal_name = %s"
+            params.append(company)
 
-        if website:
-            query += " AND hq_website = %s"
-            params.append(website)
+    if website:
+        query += " AND hq_website = %s"
+        params.append(website)
 
-        if not company and not website:
-            raise HTTPException(status_code=400, detail="Provide at least one parameter: company or website")
+    if not company and not website:
+        raise HTTPException(status_code=400, detail="Provide at least one search parameter")
 
-        cursor.execute(query, tuple(params))
-        results = cursor.fetchall()
+    cursor.execute(query, tuple(params))
+    results = cursor.fetchall()
 
-        cursor.close()
-        conn.close()
+    cursor.close()
+    conn.close()
 
-        if not results:
-            raise HTTPException(status_code=404, detail="No records found")
+    if not results:
+        raise HTTPException(status_code=404, detail="No matching records found")
 
-        return {"count": len(results), "results": results, "requested_by": current_user}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# Log Render URL when app starts
-@app.on_event("startup")
-async def startup_event():
-    render_url = "https://fastapi-accounts-api.onrender.com"
-    print(f"✅ Service running at: {render_url}")
-    print("📌 Use /docs for Swagger UI or /redoc for ReDoc")
-
-@app.get("/")
-def root():
-    return {"message": "API is running. Use /docs for Swagger UI or /accounts for data."}
-
+    return {"count": len(results), "results": results}
