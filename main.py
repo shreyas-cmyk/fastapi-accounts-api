@@ -7,6 +7,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import bcrypt
 from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 
 # ===============================
 # Config
@@ -163,3 +164,6 @@ async def search_accounts(
         raise HTTPException(status_code=404, detail="No matching records found")
 
     return {"count": len(results), "results": results}
+@app.get("/")
+def read_root():
+    return JSONResponse(content={"message": "FastAPI Accounts API is running!"})
