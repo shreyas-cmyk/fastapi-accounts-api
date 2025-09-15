@@ -11,7 +11,7 @@ from pydantic import BaseModel
 # ===============================
 # Config
 # ===============================
-SECRET_KEY = "supersecretkey"  
+SECRET_KEY = "supersecretkey"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -110,7 +110,11 @@ async def register(user: RegisterUser):
 
 @app.post("/token")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = authenticate_user(form_data.username, form_data.password)
+    # OAuth2PasswordRequestForm uses "username" field, but we treat it as the email
+    email = form_data.username
+    password = form_data.password
+
+    user = authenticate_user(email, password)
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
 
