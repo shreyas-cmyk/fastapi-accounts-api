@@ -19,7 +19,7 @@ This is a FastAPI API hosted on Render to fetch account details and department-w
 - **Start Command:**
   uvicorn main:app --host 0.0.0.0 --port $PORT
 
-### 4. Set Environment Variables
+### 4. Set Environment Variables(Modify DB credentials accordingly)
 - DB_NAME=postgres
 - DB_USER=postgres
 - DB_PASSWORD=UmR9sGpLkSuK0PzM
