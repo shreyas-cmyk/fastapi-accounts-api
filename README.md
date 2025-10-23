@@ -27,4 +27,4 @@ This is a FastAPI API hosted on Render to fetch account details and department-w
 - DB_PORT=5432
 
 ### 5. Access Swagger Docs
-https://<your-app>.onrender.com/docs, here you get options---> to create new user and get authorization---> then token is generated---> enter the token details accordingly in the blank spaces---> then fetch the account details you wish to do, for this you have 3 options- 1)Fuzzy Search(where you can just enter initials or first word of company name), 2) Full name of company and 3) Search through company name.
+https://<your-app>.onrender.com/docs, here you get options---> to create new user and get authorization---> then token is generated---> enter the token details accordingly in the blank spaces---> then fetch the account details you wish to do, for this you have 3 options- 1)Fuzzy Search(where you can just enter initials or first word of company name), 2) Full name of company and 3) Search through company domain.
